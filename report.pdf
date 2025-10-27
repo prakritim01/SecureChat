@@ -1,0 +1,102 @@
+# SecureChat: An End-to-End Encrypted Messaging Application
+
+**Author:** [Your Name]
+**Date:** October 26, 2025
+
+---
+
+## 1. Objective & Threat Model
+
+### Objective
+This project's goal was to design, implement, and test a secure end-to-end encrypted (E2EE) chat application. The system consists of a multi-client server and command-line clients that can securely exchange messages over an untrusted network. The primary objective was to ensure message confidentiality, integrity, authenticity, and provide protection against common network attacks.
+
+### Threat Model
+The system was designed to operate under the assumption of a powerful network adversary (Man-in-the-Middle) with the following capabilities:
+* **Eavesdrop**: The adversary can read all network traffic between the clients and the server.
+* **Modify / Inject**: The adversary can alter, delete, or inject new messages into the traffic stream.
+
+The server itself is considered **untrusted**; it is assumed to be a potentially curious or compromised relay that should have no access to the plaintext content of the messages it is forwarding.
+
+---
+
+## 2. Design & Algorithms
+
+To meet our security goals, a hybrid cryptographic protocol was designed, combining asymmetric cryptography for key exchange and symmetric cryptography for bulk data encryption.
+
+### Cryptographic Primitives
+* **Key Exchange**: **Elliptic Curve Diffie-Hellman (ECDH)** using the `secp256r1` curve. This allows two clients to compute a shared secret over an insecure channel without ever transmitting the secret itself.
+* **Key Derivation**: **HKDF (HMAC-based Key Derivation Function)** with **SHA-256**. This standard function is used to convert the raw ECDH shared secret into a cryptographically strong 32-byte (256-bit) symmetric key.
+* **Symmetric Encryption**: **AES-256 in GCM (Galois/Counter Mode)**. This AEAD (Authenticated Encryption with Associated Data) mode was chosen because it provides both high-speed confidentiality (encryption) and integrity/authenticity (an authentication tag) in a single, secure primitive.
+* **Identity & Authentication**: **SHA-256 Public Key Fingerprints**. To defend against MitM attacks, the client displays a SHA-256 hash of its own public key and its peer's. Users are required to manually verify these fingerprints out-of-band (e.g., over a phone call) before the session is established.
+
+### Protocol Flow
+1.  **Handshake**:
+    * Client A and Client B connect to the server, which pairs them.
+    * Alice generates an ephemeral ECDH key pair and sends her public key to Bob.
+    * Bob generates his ephemeral key pair and sends his public key to Alice.
+    * Both clients display the fingerprints of the received keys and halt, requiring manual user confirmation (`yes/no`).
+    * If confirmed, both clients compute the same shared secret using their private key and the peer's public key.
+    * Both clients use HKDF to derive the final `session_key` from this shared secret.
+2.  **Secure Communication**:
+    * To send a message, Alice increments a sequence number (`seq`).
+    * She encrypts the message using `AES-256-GCM` with the `session_key` and a unique random **nonce**.
+    * She sends a JSON object containing the `ciphertext`, `nonce`, `tag`, and `seq`.
+    * The server relays this JSON object to Bob, seeing only encrypted data.
+    * Bob receives the JSON, verifies the `seq` number is new (to prevent replays), and then uses the `session_key` to decrypt. The decryption will fail if the ciphertext or tag was tampered with.
+
+---
+
+## 3. Implementation Details
+
+The project was implemented in Python 3 and modularized for clarity:
+* `server.py`: A simple, multi-threaded TCP server that waits for two clients and then blindly relays all traffic between them.
+* `client.py`: The main client application. It manages the user interface, state (like sequence numbers), and orchestrates the handshake and secure session using two threads (one for sending, one for receiving).
+* `key_exchange.py`: Contains all functions for generating ECDH keys, serializing them for transport, computing the shared secret, and deriving the session key via HKDF.
+* `crypto_utils.py`: A dedicated module for `encrypt_aes_gcm` and `decrypt_aes_gcm`. It handles secure nonce generation and ensures all data is properly authenticated.
+* `protocol.py`: Defines the JSON message structure and provides helper functions for creating and parsing messages, including Base64 encoding/decoding of binary data.
+
+---
+
+## 4. Results & Testing
+
+The application was tested against its core security goals using a combination of unit tests and a live integration test.
+
+### Unit Tests
+Unit tests (`pytest`) were written for the core cryptographic modules.
+* `test_key_exchange.py`: Verified that two simulated clients (Alice and Bob) independently derive the *exact same* session key.
+* `test_crypto.py`: Verified the AES-GCM implementation. This test confirmed that a message could be encrypted and decrypted (roundtrip), and more importantly, that the `decrypt` function correctly raised an `InvalidTag` error if the ciphertext or authentication tag was modified by even a single bit.
+
+### Integration & Attack Simulation
+A special test harness (`server_test_mode.py` and `tests/test_integration.py`) was created to simulate a live attacker.
+
+**Test 1: Man-in-the-Middle (MitM) Defense**
+The manual fingerprint verification step successfully prevented a MitM attack. When a user is presented with a fingerprint, they must confirm it. If an attacker was intercepting the connection, the fingerprint would not match, and the user would abort the connection.
+
+[**Insert Screenshot `01_key_exchange.png` here**]
+*Caption 1: Successful key exchange showing matching fingerprints on both clients before chat begins.*
+
+**Test 2: Server Confidentiality**
+The server was proven to be a zero-trust relay. The screenshot below shows the server log (middle) only contains metadata, while the clients (left and right) communicate with plaintext.
+
+[**Insert Screenshot `02_encrypted_chat.png` here**]
+*Caption 2: Server log (center) shows it is only relaying messages, with no access to the plaintext visible on the clients.*
+
+**Test 3: Tamper Attack**
+The attacker script sent a message with a modified ciphertext. The client's decryption function failed the integrity check and correctly discarded the message, proving our integrity protection.
+
+**Test 4: Replay Attack**
+The attacker script captured a valid message (seq=1) and resent it. The client, having already seen `seq=1`, identified this as a replay and correctly discarded the duplicate message.
+
+[**Insert Screenshot `03_attack_test.png` here**]
+*Caption 3: The victim client's terminal successfully identifying and rejecting both a tampered message and a replay attack.*
+
+---
+
+## 5. Conclusion & Future Work
+
+This project successfully demonstrated the implementation of a modern, secure E2EE chat protocol. By combining ECDH for key exchange, AES-GCM for authenticated encryption, and a manual fingerprint check, the system achieves all its core security goals: confidentiality, integrity, and authentication, while also preventing replay attacks.
+
+**Future Work:**
+* **Automated Key Verification**: The manual fingerprint check is secure but clumsy. A future version could implement a simple Public Key Infrastructure (PKI) or a "trust on first use" (TOFU) model.
+* **Group Chat**: The current protocol is 1-to-1. Group chat would require a more complex protocol for distributing and managing a shared group key.
+* **GUI**: The command-line interface could be wrapped in a simple GUI (using Tkinter or PyQt) to improve usability.

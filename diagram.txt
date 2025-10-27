@@ -1,0 +1,58 @@
+# SecureChat Protocol Flow: Sequence Diagram
+
+# Participants:
+#   - Client A (Alice)
+#   - Server (Untrusted Relay)
+#   - Client B (Bob)
+
+# Stage 1: Handshake & Key Exchange
+
+Alice                     Server                      Bob
+  |                         |                         |
+  | --- TCP Connect --->    |                         |
+  |  <-- ACK/Welcome ---    |                         |
+  |                         |    <--- TCP Connect --- |
+  |                         |    --- ACK/Welcome -->  |
+  |                         |                         |
+  | <--- Start Handshake -- | -- Start Handshake ---> |
+  |      (Paired)           |         (Paired)        |
+  |                         |                         |
+  | Generate ECDH keypair   |                         |
+  | (privA, pubA)           |                         |
+  |                         |                         |
+  | --- pubA --->           |                         |
+  |                         | --- pubA --->           |
+  |                         |                         |
+  |                         |          Generate ECDH keypair
+  |                         |          (privB, pubB)
+  |                         |                         |
+  |                         |    <--- pubB ---        |
+  |    <--- pubB ---        |                         |
+  |                         |                         |
+  | ** User Verifies B's Fingerprint ** |
+  |                         |         ** User Verifies A's Fingerprint **
+  |                         |                         |
+  | Derive Secret S         |                         | Derive Secret S
+  | Derive Session Key K    |                         | Derive Session Key K
+  |                         |                         |
+  |=========================|=========================|=========================|
+  |   HANDSHAKE COMPLETE    |   SESSION ESTABLISHED   |   HANDSHAKE COMPLETE    |
+  |=========================|=========================|=========================|
+
+
+# Stage 2: Secure Data Communication (A sends to B)
+
+Alice                     Server                      Bob
+  |                         |                         |
+  | Encrypt msg with K      |                         |
+  | {nonce, cipher, tag}    |                         |
+  |                         |                         |
+  | --- Encrypted JSON -->  |                         |
+  |                         | --- Encrypted JSON -->  |
+  |                         |                         |
+  |                         |          Verify Seq Num
+  |                         |          Decrypt with K
+  |                         |          (Success/Fail)
+  |                         |                         |
+  |                         |          Display msg
+  |                         |                         |

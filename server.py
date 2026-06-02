@@ -2,67 +2,168 @@
 import socket
 import threading
 import logging
+import struct
+import protocol  # Using our new protocol.py
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def relay_messages(sender_socket, receiver_socket, sender_id):
-    """
-    Relays messages from a sender to a receiver.
-    """
-    try:
+# --- TCP Framing Helpers ---
+def recvall(sock, n):
+    """Helper function to read exactly n bytes from the socket."""
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return bytes(data)
+
+def recv_framed(sock):
+    """Reads a 4-byte length header, then reads the exact message payload."""
+    raw_msglen = recvall(sock, 4)
+    if not raw_msglen:
+        return None
+    msglen = struct.unpack('>I', raw_msglen)[0]
+    return recvall(sock, msglen)
+
+def send_framed(sock, message_bytes):
+    """Prepends a 4-byte length header to the message before sending."""
+    msglen = len(message_bytes)
+    header = struct.pack('>I', msglen)
+    sock.sendall(header + message_bytes)
+# ---------------------------
+
+class ChatServer:
+    def __init__(self, host='0.0.0.0', port=9000):
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((host, port))
+        
+        # { "username": { "socket": client_socket, "partner": None } }
+        self.clients = {}
+        self.client_lock = threading.Lock()
+        
+        logging.info(f"[*] Lobby Server listening on {host}:{port}")
+
+    def start(self):
+        self.server_socket.listen()
         while True:
-            message = sender_socket.recv(4096)
-            if not message:
-                break # Client disconnected
+            try:
+                client_socket, addr = self.server_socket.accept()
+                logging.info(f"[+] New connection from {addr}")
+                thread = threading.Thread(target=self.handle_client, args=(client_socket,))
+                thread.daemon = True
+                thread.start()
+            except Exception as e:
+                logging.error(f"[!] Error accepting connections: {e}")
+
+    def handle_client(self, client_socket):
+        username = None
+        try:
+            # --- 1. LOGIN ---
+            # Replaced client_socket.recv(1024) with TCP Framing
+            login_msg_bytes = recv_framed(client_socket)
+            if not login_msg_bytes:
+                client_socket.close()
+                return
+
+            login_msg = protocol.parse_message(login_msg_bytes)
             
-            logging.info(f"Relaying message from Client {sender_id} to peer.")
-            receiver_socket.send(message)
-    except Exception as e:
-        logging.error(f"[!] Error with client {sender_id}: {e}")
-    finally:
-        logging.info(f"[-] Client {sender_id} disconnected.")
-        # Close both sockets when one disconnects
-        sender_socket.close()
-        receiver_socket.close()
+            if not login_msg or login_msg.get('type') != 'login':
+                client_socket.close()
+                return
 
-def start_server(host='0.0.0.0', port=9000):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((host, port))
-    server_socket.listen(2)
-    logging.info(f"[*] Server listening on {host}:{port}")
+            username = login_msg.get('username')
+            
+            with self.client_lock:
+                if not username or username in self.clients:
+                    client_socket.close()
+                    return
+                self.clients[username] = {"socket": client_socket, "partner": None}
+                logging.info(f"[+] User '{username}' logged in.")
+            
+            # --- 2. BROADCAST LIST ---
+            self.broadcast_user_list()
 
-    # --- Wait for both clients to connect BEFORE starting relay ---
-    try:
-        logging.info("Waiting for Client 1...")
-        client1_sock, addr1 = server_socket.accept()
-        logging.info(f"[+] Client 1 connected from {addr1}")
+            # --- 3. MESSAGE LOOP ---
+            while True:
+                # Replaced client_socket.recv(4096) with TCP Framing
+                message_bytes = recv_framed(client_socket)
+                if not message_bytes:
+                    break
+                self.process_message(username, message_bytes)
 
-        logging.info("Waiting for Client 2...")
-        client2_sock, addr2 = server_socket.accept()
-        logging.info(f"[+] Client 2 connected from {addr2}")
+        except Exception as e:
+            logging.error(f"[!] Error for '{username}': {e}")
+        finally:
+            self.cleanup_client(username)
+
+    def process_message(self, sender_username, message_bytes):
+        msg = protocol.parse_message(message_bytes)
+        if not msg:
+            return
         
-        logging.info("[*] Both clients connected. Starting relay threads...")
+        msg_type = msg.get('type')
+        target_username = msg.get('to')
 
-        # Create two threads, one for each direction
-        thread1 = threading.Thread(target=relay_messages, args=(client1_sock, client2_sock, 1))
-        thread2 = threading.Thread(target=relay_messages, args=(client2_sock, client1_sock, 2))
-        
-        thread1.daemon = True
-        thread2.daemon = True
-        
-        thread1.start()
-        thread2.start()
-        
-        # Keep the main thread alive to wait for threads to finish
-        thread1.join()
-        thread2.join()
+        with self.client_lock:
+            # --- INTELLIGENT ROUTING FIX ---
+            # If the message doesn't say who it's for, check if we are paired.
+            if not target_username:
+                target_username = self.clients[sender_username].get("partner")
 
-    except KeyboardInterrupt:
-        logging.info("Server shutting down.")
-    finally:
-        server_socket.close()
-        logging.info("Server closed.")
+            # Update state for lobby commands
+            if msg_type == 'chat_request' and target_username:
+                self.clients[sender_username]["partner"] = target_username
+                if target_username in self.clients:
+                    self.clients[target_username]["partner"] = sender_username
+            
+            elif msg_type in ['chat_end', 'chat_reject'] and target_username:
+                self.clients[sender_username]["partner"] = None
+                if target_username in self.clients:
+                    self.clients[target_username]["partner"] = None
+
+            # --- RELAY ---
+            if target_username and target_username in self.clients:
+                try:
+                    recipient_socket = self.clients[target_username]["socket"]
+                    # Replaced send() with send_framed()
+                    send_framed(recipient_socket, message_bytes)
+                except Exception as e:
+                    logging.error(f"[!] Relay failed: {e}")
+            else:
+                logging.warning(f"[!] Could not relay message from {sender_username} (Target: {target_username})")
+
+    def broadcast_user_list(self):
+        with self.client_lock:
+            available_users = [u for u, d in self.clients.items() if d["partner"] is None]
+            if not available_users: return
+            
+            message = protocol.create_user_list_message(available_users)
+            for user in self.clients:
+                try:
+                    # Replaced send() with send_framed()
+                    send_framed(self.clients[user]["socket"], message)
+                except: pass
+
+    def cleanup_client(self, username):
+        if not username: return
+        with self.client_lock:
+            if username in self.clients:
+                partner = self.clients[username].get("partner")
+                data = self.clients.pop(username)
+                try: data["socket"].close()
+                except: pass
+
+                if partner and partner in self.clients:
+                    self.clients[partner]["partner"] = None
+                    try:
+                        end_msg = protocol.create_chat_end_message(username, partner)
+                        # Replaced send() with send_framed()
+                        send_framed(self.clients[partner]["socket"], end_msg)
+                    except: pass
+        self.broadcast_user_list()
 
 if __name__ == "__main__":
-    start_server()
+    server = ChatServer()
+    server.start()

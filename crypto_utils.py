@@ -8,16 +8,17 @@ AES_KEY_SIZE = 32
 # GCM standard recommends a 96-bit (12-byte) nonce for efficiency and security
 NONCE_SIZE = 12
 
-def encrypt_aes_gcm(plaintext, key):
+def encrypt_aes_gcm(plaintext, key, aad=None):
     """
-    Encrypts plaintext using AES-256-GCM.
+    Encrypts plaintext using AES-256-GCM with Authenticated Additional Data (AAD).
 
     Args:
         plaintext (bytes): The data to encrypt.
         key (bytes): The 256-bit (32-byte) encryption key.
+        aad (bytes, optional): Authenticated Additional Data (e.g., sequence numbers).
 
     Returns:
-        A tuple of (nonce, ciphertext, tag) as bytes.
+        A tuple of (nonce, combined_ciphertext) as bytes.
     """
     if len(key) != AES_KEY_SIZE:
         raise ValueError("Key must be 32 bytes for AES-256")
@@ -27,27 +28,24 @@ def encrypt_aes_gcm(plaintext, key):
     nonce = os.urandom(NONCE_SIZE)
     
     aesgcm = AESGCM(key)
-    ciphertext = aesgcm.encrypt(nonce, plaintext, None) # No associated data
+    
+    # Pass AAD to bind metadata (like sequence numbers) to this specific ciphertext.
+    # The cryptography library automatically appends the 16-byte authentication tag 
+    # to the end of the ciphertext, creating a single unified byte string.
+    combined_ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
 
-    # The tag is generated during encryption and is used for authentication
-    # GCM's tag is typically appended to the ciphertext, but we'll handle it separately.
-    # The standard tag size for GCM is 16 bytes.
-    tag_start_index = len(ciphertext) - 16
-    tag = ciphertext[tag_start_index:]
-    actual_ciphertext = ciphertext[:tag_start_index]
-
-    return nonce, actual_ciphertext, tag
+    return nonce, combined_ciphertext
 
 
-def decrypt_aes_gcm(nonce, ciphertext, tag, key):
+def decrypt_aes_gcm(nonce, combined_ciphertext, key, aad=None):
     """
-    Decrypts ciphertext using AES-256-GCM.
+    Decrypts ciphertext using AES-256-GCM, verifying the AAD.
 
     Args:
         nonce (bytes): The nonce that was used for encryption.
-        ciphertext (bytes): The encrypted data.
-        tag (bytes): The authentication tag.
+        combined_ciphertext (bytes): The encrypted data with the appended auth tag.
         key (bytes): The 256-bit (32-byte) encryption key.
+        aad (bytes, optional): Authenticated Additional Data used during encryption.
 
     Returns:
         The decrypted plaintext (bytes).
@@ -59,13 +57,10 @@ def decrypt_aes_gcm(nonce, ciphertext, tag, key):
         raise ValueError("Key must be 32 bytes for AES-256")
     
     aesgcm = AESGCM(key)
-    
-    # Combine ciphertext and tag for decryption
-    combined_ciphertext = ciphertext + tag
 
     # Decryption will fail with an InvalidTag exception if the key is wrong,
-    # the nonce is wrong, or the data/tag was tampered with.
-    plaintext = aesgcm.decrypt(nonce, combined_ciphertext, None)
+    # the nonce is wrong, the data/tag was tampered with, or the AAD doesn't match.
+    plaintext = aesgcm.decrypt(nonce, combined_ciphertext, aad)
     return plaintext
 
 # --- Helper functions for network transmission ---

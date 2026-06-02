@@ -1,129 +1,112 @@
 # tests/test_integration.py
+import socket
 import sys
 import os
-import socket
 import json
+import struct
 import time
 
-# Add the root project directory to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
+# Ensure we can import your crypto modules from the parent directory
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import key_exchange as ke
 import crypto_utils as cu
 import protocol
 
-# --- Attacker's "Bob" Identity ---
-BOB_USERNAME = "attacker_bob"
-BOB_PRIV_KEY, BOB_PUB_KEY = ke.generate_ecdh_key_pair()
-BOB_PUB_KEY_PEM = ke.serialize_public_key(BOB_PUB_KEY)
-SESSION_KEY = None
+# --- TCP Framing Helpers ---
+def recvall(sock, n):
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet: return None
+        data.extend(packet)
+    return bytes(data)
 
-def perform_attacker_handshake(sock):
-    """Performs a 'valid' handshake to establish a session key."""
-    global SESSION_KEY
-    
-    # 1. Send our (Bob's) public key
-    handshake_msg = protocol.create_handshake_message(BOB_USERNAME, BOB_PUB_KEY_PEM)
-    sock.send(handshake_msg)
-    print("\n[ATTACKER] Sent public key.")
+def recv_framed(sock):
+    raw_msglen = recvall(sock, 4)
+    if not raw_msglen: return None
+    msglen = struct.unpack('>I', raw_msglen)[0]
+    return recvall(sock, msglen)
 
-    # 2. Receive Alice's public key
-    alice_response_bytes = sock.recv(4096)
-    alice_msg = protocol.parse_message(alice_response_bytes)
-    
-    # --- THIS IS THE CORRECTED LINE ---
-    if not alice_msg or alice_msg["type"] != "handshake_pubkey":
-        print(f"[ATTACKER] Handshake failed. Expected 'handshake_pubkey', got: {alice_msg}")
-        raise Exception("Handshake failed")
-    # ---
-    
-    print("[ATTACKER] Received Alice's public key.")
-    alice_public_key = ke.deserialize_public_key(alice_msg["pubkey"])
+def send_framed(sock, message_bytes):
+    msglen = len(message_bytes)
+    header = struct.pack('>I', msglen)
+    sock.sendall(header + message_bytes)
+# ---------------------------
 
-    # 3. Establish session key
-    shared_secret = ke.create_shared_secret(BOB_PRIV_KEY, alice_public_key)
-    SESSION_KEY = ke.derive_session_key(shared_secret)
-    print(f"[ATTACKER] Session key established: {SESSION_KEY.hex()[:10]}...")
+def run_attack():
+    print("[*] 😈 Attacker Script Started")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(('127.0.0.1', 9000))
+
+    # 1. Login to Lobby as 'attacker'
+    send_framed(sock, json.dumps({"type": "login", "username": "attacker"}).encode('utf-8'))
     
-    # Wait 10 seconds to give the human user time to
-    # type 'yes' in the real client's terminal.
-    print("[ATTACKER] Waiting 10s for user to approve handshake in client...")
+    # 2. Request chat with 'alice'
+    send_framed(sock, json.dumps({"type": "chat_request", "from": "attacker", "to": "alice"}).encode('utf-8'))
+
+    # 3. Handshake
+    my_priv, my_pub = ke.generate_ecdh_key_pair()
+    my_pub_pem = ke.serialize_public_key(my_pub)
+    
+    hs_msg = json.loads(protocol.create_handshake_message("attacker", my_pub_pem).decode('utf-8'))
+    hs_msg["to"] = "alice"
+    send_framed(sock, json.dumps(hs_msg).encode('utf-8'))
+
+    print("[*] Sent malicious public key. Waiting for Alice's key...")
+
+    # Wait for Alice's key
+    peer_pub_pem = None
+    while True:
+        resp = recv_framed(sock)
+        if not resp: return
+        msg = protocol.parse_message(resp)
+        if msg and msg["type"] == "handshake_pubkey":
+            peer_pub_pem = msg["pubkey"]
+            break
+
+    print("[*] Received Alice's key. Deriving session key...")
+    peer_pub = ke.deserialize_public_key(peer_pub_pem)
+    shared_secret = ke.create_shared_secret(my_priv, peer_pub)
+    session_key = ke.derive_session_key(shared_secret, my_pub_pem, peer_pub_pem)
+
+    print("\n[!] IMPORTANT: GO TO ALICE'S TERMINAL AND TYPE 'yes' NOW!")
+    print("[*] Sleeping for 10 seconds to give you time...")
     time.sleep(10)
 
+    # --- ATTACK 1: VALID MESSAGE ---
+    print("\n[*] 1. Sending Valid Message...")
+    seq = 0
+    aad = str(seq).encode('utf-8')
+    nonce, combined_cipher = cu.encrypt_aes_gcm(b"Hello Alice, this is a legitimate message.", session_key, aad=aad)
+    valid_msg = protocol.create_encrypted_message("attacker", nonce, combined_cipher, "", seq)
+    vm = json.loads(valid_msg.decode('utf-8'))
+    vm["to"] = "alice"
+    send_framed(sock, json.dumps(vm).encode('utf-8'))
+    time.sleep(1.5)
 
-def test_tamper_attack(sock):
-    """
-    Test 1: Send a message with a tampered ciphertext.
-    The client should detect this (InvalidTag) and reject it.
-    """
-    print("\n--- Running Tamper Attack ---")
-    plaintext = b"This is a message... that will be... tampered!"
+    # --- ATTACK 2: TAMPERED MESSAGE (Integrity Attack) ---
+    print("[*] 2. Sending Tampered Message (Flipping a byte in ciphertext)...")
+    seq = 1
+    aad = str(seq).encode('utf-8')
+    nonce2, combined_cipher2 = cu.encrypt_aes_gcm(b"This message will be tampered with.", session_key, aad=aad)
     
-    nonce, ciphertext, tag = cu.encrypt_aes_gcm(plaintext, SESSION_KEY)
+    # Tamper with the last byte of the GCM Auth Tag
+    tampered_cipher = combined_cipher2[:-1] + bytes([combined_cipher2[-1] ^ 0xFF])
     
-    # --- TAMPERING ---
-    tampered_ciphertext = bytearray(ciphertext)
-    tampered_ciphertext[5] ^= 0xFF # Flip all bits in the 5th byte
-    print("[ATTACKER] Tampering with ciphertext...")
-    # ---
-    
-    # Send the malicious message (seq=0)
-    msg = protocol.create_encrypted_message(
-        BOB_USERNAME, nonce, bytes(tampered_ciphertext), tag, 0
-    )
-    sock.send(msg)
-    print("[ATTACKER] Sent tampered message (seq=0).")
-    time.sleep(1) # Give client time to process
+    tamper_msg = protocol.create_encrypted_message("attacker", nonce2, tampered_cipher, "", seq)
+    tm = json.loads(tamper_msg.decode('utf-8'))
+    tm["to"] = "alice"
+    send_framed(sock, json.dumps(tm).encode('utf-8'))
+    time.sleep(1.5)
 
-def test_replay_attack(sock):
-    """
-    Test 2: Send a valid message, then send it again.
-    The client should accept the first and reject the second.
-    """
-    print("\n--- Running Replay Attack ---")
-    plaintext = b"This is a valid message (seq=1)"
-    
-    nonce, ciphertext, tag = cu.encrypt_aes_gcm(plaintext, SESSION_KEY)
-    
-    # Send the valid message (seq=1)
-    msg = protocol.create_encrypted_message(
-        BOB_USERNAME, nonce, ciphertext, tag, 1
-    )
-    
-    # --- ATTACK ---
-    print("[ATTACKER] Sending valid message (seq=1)...")
-    sock.send(msg)
-    time.sleep(1) # Give client time to process
-    
-    print("[ATTACKER] RE-SENDING same message (seq=1)...")
-    sock.send(msg) # Send the *exact same message*
+    # --- ATTACK 3: REPLAY ATTACK ---
+    print("[*] 3. Sending Replay Attack (Reusing seq=0)...")
+    # We completely reuse the exact valid message from Attack 1
+    send_framed(sock, json.dumps(vm).encode('utf-8'))
     time.sleep(1)
-    # ---
 
-def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.connect(('127.0.0.1', 9000))
-        
-        # Step 1: Handshake (now includes a 10s pause)
-        perform_attacker_handshake(sock)
-        
-        # Step 2: Run Tamper Test
-        test_tamper_attack(sock)
-        
-        # Step 3: Run Replay Test
-        test_replay_attack(sock)
-        
-        # Keep connection alive for a few more seconds
-        print("\n[ATTACKER] Attacks sent. Waiting 3s for client to process...")
-        time.sleep(3) 
-        
-        print("[ATTACKER] All tests complete.")
-        
-    except Exception as e:
-        print(f"\n[ATTACKER] Error: {e}")
-    finally:
-        sock.close()
+    print("\n[*] Attacks fired! Check Alice's terminal to see the defenses in action.")
+    sock.close()
 
 if __name__ == "__main__":
-    main()
+    run_attack()

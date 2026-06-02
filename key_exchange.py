@@ -28,16 +28,20 @@ def create_shared_secret(private_key, peer_public_key):
     shared_secret = private_key.exchange(ec.ECDH(), peer_public_key)
     return shared_secret
 
-def derive_session_key(shared_secret):
-    """Derives a 256-bit (32-byte) session key from the shared secret using HKDF."""
-    # HKDF is a standard way to derive a cryptographic key from a shared secret.
-    # We use SHA256 as the hash function. The 'info' parameter can be used to
-    # bind the key to a specific context, but we'll keep it simple for now.
+def derive_session_key(shared_secret, my_pub_bytes, peer_pub_bytes):
+    """
+    Derives a 256-bit (32-byte) session key from the shared secret using HKDF.
+    Mixes both public keys into the context string to prevent cross-protocol attacks.
+    """
+    # Sort the public keys so both Alice and Bob generate the exact same info string
+    # regardless of who initiated the connection.
+    context_info = b'secure-chat:' + min(my_pub_bytes, peer_pub_bytes) + max(my_pub_bytes, peer_pub_bytes)
+    
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=32,  # 32 bytes = 256 bits for AES-256
         salt=None,
-        info=b'secure-chat-session-key',
+        info=context_info,
     )
     return hkdf.derive(shared_secret)
 

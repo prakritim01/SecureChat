@@ -7,7 +7,7 @@ import protocol  # Using our new protocol.py
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- TCP Framing Helpers ---
+% --- TCP Framing Helpers ---
 def recvall(sock, n):
     """Helper function to read exactly n bytes from the socket."""
     data = bytearray()
@@ -60,8 +60,51 @@ class ChatServer:
     def handle_client(self, client_socket):
         username = None
         try:
-            # --- 1. LOGIN ---
-            login_msg_bytes = recv_framed(client_socket)
+            # --- HTTP INTERCEPT PATCH ---
+            # Peek at or read the first 4 bytes to check for a browser HTTP GET request
+            first_4_bytes = recvall(client_socket, 4)
+            if not first_4_bytes:
+                client_socket.close()
+                return
+
+            if first_4_bytes == b"GET ":
+                html_content = """<!DOCTYPE html>
+<html>
+<head>
+    <title>SecureChat Server</title>
+    <style>
+        body { background: #0f172a; color: #e2e8f0; font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { text-align: center; padding: 2.5rem; border: 1px solid #334155; border-radius: 12px; background: #1e293b; max-width: 420px; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.3); }
+        h1 { color: #3b82f6; margin-top: 0; font-size: 2rem; }
+        p { color: #94a3b8; line-height: 1.6; font-size: 0.95rem; }
+        .badge { display: inline-block; background: #10b981; color: white; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.875rem; font-weight: 600; margin-bottom: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">Active</div>
+        <h1>SecureChat Server</h1>
+        <p>The cryptographic TCP socket server is live. Client desktop nodes can establish secure peer connections directly through this endpoint architecture.</p>
+    </div>
+</body>
+</html>"""
+                
+                http_response = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {len(html_content.encode('utf-8'))}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    f"{html_content}"
+                )
+                client_socket.sendall(http_response.encode('utf-8'))
+                client_socket.close()
+                return
+
+            # --- STANDARD LOGIN LOGIC ---
+            # Unpack the length header from the 4 bytes we already read
+            msglen = struct.unpack('>I', first_4_bytes)[0]
+            login_msg_bytes = recvall(client_socket, msglen)
             if not login_msg_bytes:
                 client_socket.close()
                 return
@@ -154,12 +197,12 @@ class ChatServer:
                     self.clients[partner]["partner"] = None
                     try:
                         end_msg = protocol.create_chat_end_message(username, partner)
-                        send_framed(self.clients[partner]["socket"], end_msg)
+                        gather_socket = self.clients[partner]["socket"]
+                        send_framed(gather_socket, end_msg)
                     except: pass
         self.broadcast_user_list()
 
 if __name__ == "__main__":
-    # --- ADDED RENDER DYNAMIC PORT LOGIC HERE ---
     HOST = '0.0.0.0'
     PORT = int(os.environ.get('PORT', 9000))
     server = ChatServer(host=HOST, port=PORT)

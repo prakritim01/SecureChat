@@ -1,4 +1,4 @@
-# server.py
+import os  # <-- ADDED THIS
 import socket
 import threading
 import logging
@@ -61,7 +61,6 @@ class ChatServer:
         username = None
         try:
             # --- 1. LOGIN ---
-            # Replaced client_socket.recv(1024) with TCP Framing
             login_msg_bytes = recv_framed(client_socket)
             if not login_msg_bytes:
                 client_socket.close()
@@ -87,7 +86,6 @@ class ChatServer:
 
             # --- 3. MESSAGE LOOP ---
             while True:
-                # Replaced client_socket.recv(4096) with TCP Framing
                 message_bytes = recv_framed(client_socket)
                 if not message_bytes:
                     break
@@ -108,7 +106,6 @@ class ChatServer:
 
         with self.client_lock:
             # --- INTELLIGENT ROUTING FIX ---
-            # If the message doesn't say who it's for, check if we are paired.
             if not target_username:
                 target_username = self.clients[sender_username].get("partner")
 
@@ -127,7 +124,6 @@ class ChatServer:
             if target_username and target_username in self.clients:
                 try:
                     recipient_socket = self.clients[target_username]["socket"]
-                    # Replaced send() with send_framed()
                     send_framed(recipient_socket, message_bytes)
                 except Exception as e:
                     logging.error(f"[!] Relay failed: {e}")
@@ -142,7 +138,6 @@ class ChatServer:
             message = protocol.create_user_list_message(available_users)
             for user in self.clients:
                 try:
-                    # Replaced send() with send_framed()
                     send_framed(self.clients[user]["socket"], message)
                 except: pass
 
@@ -159,11 +154,13 @@ class ChatServer:
                     self.clients[partner]["partner"] = None
                     try:
                         end_msg = protocol.create_chat_end_message(username, partner)
-                        # Replaced send() with send_framed()
                         send_framed(self.clients[partner]["socket"], end_msg)
                     except: pass
         self.broadcast_user_list()
 
 if __name__ == "__main__":
-    server = ChatServer()
+    # --- ADDED RENDER DYNAMIC PORT LOGIC HERE ---
+    HOST = '0.0.0.0'
+    PORT = int(os.environ.get('PORT', 9000))
+    server = ChatServer(host=HOST, port=PORT)
     server.start()

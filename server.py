@@ -7,7 +7,7 @@ import protocol  # Using our new protocol.py
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-% --- TCP Framing Helpers ---
+# --- TCP Framing Helpers ---
 def recvall(sock, n):
     """Helper function to read exactly n bytes from the socket."""
     data = bytearray()
@@ -61,7 +61,6 @@ class ChatServer:
         username = None
         try:
             # --- HTTP INTERCEPT PATCH ---
-            # Peek at or read the first 4 bytes to check for a browser HTTP GET request
             first_4_bytes = recvall(client_socket, 4)
             if not first_4_bytes:
                 client_socket.close()
@@ -102,7 +101,6 @@ class ChatServer:
                 return
 
             # --- STANDARD LOGIN LOGIC ---
-            # Unpack the length header from the 4 bytes we already read
             msglen = struct.unpack('>I', first_4_bytes)[0]
             login_msg_bytes = recvall(client_socket, msglen)
             if not login_msg_bytes:
@@ -148,11 +146,9 @@ class ChatServer:
         target_username = msg.get('to')
 
         with self.client_lock:
-            # --- INTELLIGENT ROUTING FIX ---
             if not target_username:
                 target_username = self.clients[sender_username].get("partner")
 
-            # Update state for lobby commands
             if msg_type == 'chat_request' and target_username:
                 self.clients[sender_username]["partner"] = target_username
                 if target_username in self.clients:
